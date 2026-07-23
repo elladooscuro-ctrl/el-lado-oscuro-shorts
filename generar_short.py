@@ -330,56 +330,57 @@ def publicar_en_youtube(youtube_service, ruta_video: Path, titulo: str, hashtags
 # Mecanismo de catch-up: 10 publicaciones/dia repartidas en horario activo
 # ---------------------------------------------------------------------------
 
-PUBLICACIONES_POR_DIA = 10
-HORA_INICIO_DIA = 0   # 08:00
-HORA_FIN_DIA = 24      # 23:00
+HORARIOS_CHILE = [
+       (0, 0),
+       (2, 30),
+       (5, 0),
+       (7, 30),
+       (10, 0),
+       (12, 0),
+       (14, 30),
+       (17, 0),
+       (19, 30),
+       (22, 0),
+]
+OFFSET_CHILE = datetime.timedelta(hours=-4)
 MAX_PUBLICACIONES_POR_CORRIDA = 3  # limite de seguridad por ejecucion del workflow
 
-
 def calcular_publicaciones_pendientes(drive_service, carpeta_videos_gen_id: str) -> int:
-    """
-    Calcula cuantos videos deberian haberse publicado hoy a esta hora,
-    comparado con los que ya se publicaron (contando archivos en
-    'Videos Generados/YYYY-MM-DD/'). Si el workflow se salto ejecuciones,
-    esto devuelve un numero > 1 para ponerse al dia.
-    """
-    ahora = datetime.datetime.now()
-    hoy = ahora.date().isoformat()
+       """
+           Compara la hora actual (Chile) contra los 10 horarios fijos de
+               HORARIOS_CHILE para saber cuantas publicaciones deberian haberse hecho
+                   hoy a esta hora, comparado con las que ya se publicaron (contando
+                       archivos en 'Videos Generados/YYYY-MM-DD/'). Si el workflow se salto
+                           ejecuciones, esto devuelve un numero > 1 para ponerse al dia.
+                               """
+       ahora_utc = datetime.datetime.utcnow()
+       ahora_chile = ahora_utc + OFFSET_CHILE
+       hoy = ahora_chile.date().isoformat()
 
-    minutos_totales = (HORA_FIN_DIA - HORA_INICIO_DIA) * 60
-    minutos_transcurridos = max(
-        0, (ahora.hour - HORA_INICIO_DIA) * 60 + ahora.minute
+    objetivo_hasta_ahora = sum(
+               1 for (h, m) in HORARIOS_CHILE
+               if (ahora_chile.hour, ahora_chile.minute) >= (h, m)
     )
-    minutos_transcurridos = min(minutos_transcurridos, minutos_totales)
-
-    if ahora.hour < HORA_INICIO_DIA:
-        objetivo_hasta_ahora = 0
-    else:
-        objetivo_hasta_ahora = round(
-            (minutos_transcurridos / minutos_totales) * PUBLICACIONES_POR_DIA
-        )
 
     query = (
-        f"name = '{hoy}' and mimeType = 'application/vnd.google-apps.folder' "
-        f"and '{carpeta_videos_gen_id}' in parents and trashed = false"
+               f"name = '{hoy}' and mimeType = 'application/vnd.google-apps.folder' "
+               f"and '{carpeta_videos_gen_id}' in parents and trashed = false"
     )
     resultado = drive_service.files().list(q=query, fields="files(id, name)").execute()
     carpetas = resultado.get("files", [])
     ya_publicados = 0
     if carpetas:
-        carpeta_hoy_id = carpetas[0]["id"]
-        q2 = f"'{carpeta_hoy_id}' in parents and trashed = false and mimeType = 'video/mp4'"
-        r2 = drive_service.files().list(q=q2, fields="files(id)").execute()
-        ya_publicados = len(r2.get("files", []))
+               carpeta_hoy_id = carpetas[0]["id"]
+               q2 = f"'{carpeta_hoy_id}' in parents and trashed = false and mimeType = 'video/mp4'"
+               r2 = drive_service.files().list(q=q2, fields="files(id)").execute()
+               ya_publicados = len(r2.get("files", []))
 
     pendientes = max(0, objetivo_hasta_ahora - ya_publicados)
     print(
-        f"[catch-up] objetivo hasta ahora: {objetivo_hasta_ahora} | "
-        f"ya publicados hoy: {ya_publicados} | pendientes: {pendientes}"
+               f"[catch-up] objetivo hasta ahora: {objetivo_hasta_ahora} | "
+               f"ya publicados hoy: {ya_publicados} | pendientes: {pendientes}"
     )
     return min(pendientes, MAX_PUBLICACIONES_POR_CORRIDA)
-
-
 # ---------------------------------------------------------------------------
 # Flujo principal
 # ---------------------------------------------------------------------------
