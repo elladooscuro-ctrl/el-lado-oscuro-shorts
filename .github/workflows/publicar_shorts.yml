@@ -2,9 +2,9 @@ name: Publicar Shorts - El Lado Oscuro
 
 on:
   schedule:
-    # Cada 15 minutos. El propio script decide si toca publicar o no,
+    # Cada 30 minutos. El propio script decide si toca publicar o no,
     # y hace catch-up si el workflow se salto una ejecucion.
-    - cron: "*/15 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
 concurrency:
