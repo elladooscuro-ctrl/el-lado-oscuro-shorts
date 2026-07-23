@@ -30,8 +30,7 @@ jobs:
       - name: Instalar fuentes (para TextClip del CTA)
         run: sudo apt-get install -y fonts-dejavu-core
       - name: Instalar ImageMagick (para TextClip del CTA)
-        run: sudo apt-get install -y imagemagick
-
+        run: sudo apt-get install -y imagemagick && sudo sed -i '/pattern="@\*"/d' /etc/ImageMagick-6/policy.xml
       - name: Instalar dependencias de Python
         run: pip install -r requirements.txt
 
