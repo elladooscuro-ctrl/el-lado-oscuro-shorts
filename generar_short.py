@@ -331,8 +331,8 @@ def publicar_en_youtube(youtube_service, ruta_video: Path, titulo: str, hashtags
 # ---------------------------------------------------------------------------
 
 PUBLICACIONES_POR_DIA = 10
-HORA_INICIO_DIA = 8   # 08:00
-HORA_FIN_DIA = 23      # 23:00
+HORA_INICIO_DIA = 0   # 08:00
+HORA_FIN_DIA = 24      # 23:00
 MAX_PUBLICACIONES_POR_CORRIDA = 3  # limite de seguridad por ejecucion del workflow
 
 
