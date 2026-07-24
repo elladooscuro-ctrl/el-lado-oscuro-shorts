@@ -301,6 +301,55 @@ def mover_archivo_drive(drive_service, file_id: str, carpeta_origen_id: str, car
 
 
 # ---------------------------------------------------------------------------
+# Estado de publicaciones (contador explicito, evita depender de listados
+# de Drive con consistencia eventual, que causaban conteos desincronizados)
+# ---------------------------------------------------------------------------
+
+NOMBRE_ARCHIVO_ESTADO = "estado_publicaciones.json"
+
+
+def _buscar_o_crear_archivo_estado(drive_service, carpeta_raiz_id: str):
+    query = (
+        f"name = '{NOMBRE_ARCHIVO_ESTADO}' and '{carpeta_raiz_id}' in parents "
+        "and trashed = false"
+    )
+    resultado = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    archivos = resultado.get("files", [])
+    if archivos:
+        return archivos[0]["id"]
+
+    hoy = datetime.date.today().isoformat()
+    contenido = json.dumps({"fecha": hoy, "publicados": 0}).encode("utf-8")
+    tmp_path = TMP_DIR / NOMBRE_ARCHIVO_ESTADO
+    tmp_path.write_bytes(contenido)
+    metadata = {"name": NOMBRE_ARCHIVO_ESTADO, "parents": [carpeta_raiz_id]}
+    media = MediaFileUpload(str(tmp_path), mimetype="application/json")
+    archivo = drive_service.files().create(body=metadata, media_body=media, fields="id").execute()
+    return archivo["id"]
+
+
+def leer_estado_publicaciones(drive_service, archivo_estado_id: str) -> dict:
+    request = drive_service.files().get_media(fileId=archivo_estado_id)
+    tmp_path = TMP_DIR / "estado_actual.json"
+    with open(tmp_path, "wb") as f:
+        downloader = MediaIoBaseDownload(f, request)
+        listo = False
+        while not listo:
+            _, listo = downloader.next_chunk()
+    try:
+        return json.loads(tmp_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"fecha": datetime.date.today().isoformat(), "publicados": 0}
+
+
+def guardar_estado_publicaciones(drive_service, archivo_estado_id: str, estado: dict):
+    tmp_path = TMP_DIR / "estado_nuevo.json"
+    tmp_path.write_text(json.dumps(estado), encoding="utf-8")
+    media = MediaFileUpload(str(tmp_path), mimetype="application/json")
+    drive_service.files().update(fileId=archivo_estado_id, media_body=media).execute()
+
+
+# ---------------------------------------------------------------------------
 # YouTube helpers
 # ---------------------------------------------------------------------------
 
@@ -346,13 +395,19 @@ OFFSET_CHILE = datetime.timedelta(hours=-4)
 MAX_PUBLICACIONES_POR_CORRIDA = 3  # limite de seguridad por ejecucion del workflow
 
 
-def calcular_publicaciones_pendientes(drive_service, carpeta_videos_gen_id: str) -> int:
+def calcular_publicaciones_pendientes(drive_service, archivo_estado_id: str) -> int:
     """
     Compara la hora actual (Chile) contra los 10 horarios fijos de
     HORARIOS_CHILE para saber cuantas publicaciones deberian haberse hecho
-    hoy a esta hora, comparado con las que ya se publicaron (contando
-    archivos en 'Videos Generados/YYYY-MM-DD/'). Si el workflow se salto
-    ejecuciones, esto devuelve un numero > 1 para ponerse al dia.
+    hoy a esta hora, comparado con las que ya se publicaron segun el
+    contador explicito guardado en Drive (estado_publicaciones.json).
+
+    Antes esto se calculaba contando archivos .mp4 dentro de
+    'Videos Generados/YYYY-MM-DD/' via drive.files().list(), pero esas
+    consultas tienen consistencia eventual: justo despues de subir un
+    video, a veces no aparecia en el listado, lo que hacia que el contador
+    se "congelara" y el script siguiera publicando de mas. El contador
+    explicito evita ese problema por completo.
     """
     ahora_utc = datetime.datetime.utcnow()
     ahora_chile = ahora_utc + OFFSET_CHILE
@@ -363,19 +418,12 @@ def calcular_publicaciones_pendientes(drive_service, carpeta_videos_gen_id: str)
         if (ahora_chile.hour, ahora_chile.minute) >= (h, m)
     )
 
-    query = (
-        f"name = '{hoy}' and mimeType = 'application/vnd.google-apps.folder' "
-        f"and '{carpeta_videos_gen_id}' in parents and trashed = false"
-    )
-    resultado = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    carpetas = resultado.get("files", [])
-    ya_publicados = 0
-    if carpetas:
-        carpeta_hoy_id = carpetas[0]["id"]
-        q2 = f"'{carpeta_hoy_id}' in parents and trashed = false and mimeType = 'video/mp4'"
-        r2 = drive_service.files().list(q=q2, fields="files(id)").execute()
-        ya_publicados = len(r2.get("files", []))
+    estado = leer_estado_publicaciones(drive_service, archivo_estado_id)
+    if estado.get("fecha") != hoy:
+        estado = {"fecha": hoy, "publicados": 0}
+        guardar_estado_publicaciones(drive_service, archivo_estado_id, estado)
 
+    ya_publicados = estado.get("publicados", 0)
     pendientes = max(0, objetivo_hasta_ahora - ya_publicados)
     print(
         f"[catch-up] objetivo hasta ahora: {objetivo_hasta_ahora} | "
@@ -464,8 +512,9 @@ def main():
     carpeta_pendientes_id = buscar_id_subcarpeta(drive_service, CARPETA_PENDIENTES, DRIVE_FOLDER_ID_RAIZ)
     carpeta_publicadas_id = crear_subcarpeta_si_no_existe(drive_service, CARPETA_PUBLICADAS, DRIVE_FOLDER_ID_RAIZ)
     carpeta_videos_gen_id = crear_subcarpeta_si_no_existe(drive_service, CARPETA_VIDEOS_GENERADOS, DRIVE_FOLDER_ID_RAIZ)
+    archivo_estado_id = _buscar_o_crear_archivo_estado(drive_service, DRIVE_FOLDER_ID_RAIZ)
 
-    pendientes = calcular_publicaciones_pendientes(drive_service, carpeta_videos_gen_id)
+    pendientes = calcular_publicaciones_pendientes(drive_service, archivo_estado_id)
     if pendientes == 0:
         print("Nada pendiente por ahora segun el horario objetivo. Fin.")
         return
@@ -478,6 +527,16 @@ def main():
         if not hubo_imagen:
             break
         publicados_en_esta_corrida += 1
+
+        # Incrementar el contador explicito inmediatamente tras cada
+        # publicacion exitosa, para que corridas siguientes vean el
+        # numero correcto sin depender de listados de Drive.
+        hoy = datetime.date.today().isoformat()
+        estado = leer_estado_publicaciones(drive_service, archivo_estado_id)
+        if estado.get("fecha") != hoy:
+            estado = {"fecha": hoy, "publicados": 0}
+        estado["publicados"] = estado.get("publicados", 0) + 1
+        guardar_estado_publicaciones(drive_service, archivo_estado_id, estado)
 
     print(f"== Proceso completado. Publicados en esta corrida: {publicados_en_esta_corrida} ==")
 
