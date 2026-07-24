@@ -1,14 +1,21 @@
 name: Publicar Shorts - El Lado Oscuro
 
 on:
-  schedule:
-    # Cada 30 minutos. El propio script decide si toca publicar o no,
-    # y hace catch-up si el workflow se salto una ejecucion.
-    - cron: "*/30 * * * *"
+  # NOTA (23 jul 2026): el cron nativo de GitHub Actions se deshabilito
+  # porque el disparo real ahora lo hace un servicio externo
+  # (cron-job.org) que llama a la API workflow_dispatch cada 30 minutos.
+  # Tener ambos activos al mismo tiempo causaba que dos ejecuciones
+  # dispararan casi simultaneamente (una por el cron nativo de GitHub y
+  # otra por cron-job.org), lo que en un dia produjo 19 shorts publicados
+  # en vez del maximo de 10. El bloque concurrency de abajo ya evita
+  # corridas en paralelo, pero se deja solo workflow_dispatch como unico
+  # disparador para eliminar la fuente redundante.
+  # schedule:
+  #   - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
 concurrency:
-  group: publicar-shorts-el-lado-oscuro
+  group: publicar-shorts-${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
