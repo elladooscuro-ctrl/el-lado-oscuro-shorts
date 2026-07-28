@@ -4,7 +4,7 @@ El Lado Oscuro - Generador automatico de YouTube Shorts
 Flujo:
 1. Buscar en Drive la imagen mas antigua dentro de la carpeta "Pendientes/"
 2. Extraer la frase desde el nombre del archivo (guiones -> espacios)
-3. Generar narracion con edge-tts (voz es-MX-JorgeNeural), con 1.5s de
+3. Generar narracion con edge-tts (voz es-MX-JorgeNeural), con 0.5s de
    silencio antes y despues de la frase
 4. Generar un CTA final: pantalla negra + texto + voz diciendo
    "Sigueme si quieres mas verdades como esta."
@@ -64,8 +64,8 @@ from moviepy.editor import (
 # ---------------------------------------------------------------------------
 
 VOZ = "es-MX-JorgeNeural"
-SILENCIO_INICIO = 1.5  # segundos
-SILENCIO_FIN = 1.5     # segundos
+SILENCIO_INICIO = 0.5  # segundos
+SILENCIO_FIN = 0.5     # segundos
 TEXTO_CTA = "Sigueme si quieres mas verdades como esta."
 
 CARPETA_PENDIENTES = "Pendientes"
@@ -78,6 +78,16 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ANCHO, ALTO = 1080, 1920  # formato vertical short
 
 TMP_DIR = Path(tempfile.mkdtemp(prefix="lado_oscuro_"))
+
+# Offset horario de Chile respecto a UTC (usado para que "el dia" y las
+# publicaciones se calculen siempre en hora de Chile, no en UTC del runner).
+OFFSET_CHILE = datetime.timedelta(hours=-4)
+
+
+def ahora_chile() -> datetime.datetime:
+    """Hora actual ajustada a Chile (evita que el 'dia' cambie a las 20:00
+    hora Chile, que es cuando cambia el dia en UTC)."""
+    return datetime.datetime.utcnow() + OFFSET_CHILE
 
 
 # ---------------------------------------------------------------------------
@@ -301,55 +311,6 @@ def mover_archivo_drive(drive_service, file_id: str, carpeta_origen_id: str, car
 
 
 # ---------------------------------------------------------------------------
-# Estado de publicaciones (contador explicito, evita depender de listados
-# de Drive con consistencia eventual, que causaban conteos desincronizados)
-# ---------------------------------------------------------------------------
-
-NOMBRE_ARCHIVO_ESTADO = "estado_publicaciones.json"
-
-
-def _buscar_o_crear_archivo_estado(drive_service, carpeta_raiz_id: str):
-    query = (
-        f"name = '{NOMBRE_ARCHIVO_ESTADO}' and '{carpeta_raiz_id}' in parents "
-        "and trashed = false"
-    )
-    resultado = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    archivos = resultado.get("files", [])
-    if archivos:
-        return archivos[0]["id"]
-
-    hoy = datetime.date.today().isoformat()
-    contenido = json.dumps({"fecha": hoy, "publicados": 0}).encode("utf-8")
-    tmp_path = TMP_DIR / NOMBRE_ARCHIVO_ESTADO
-    tmp_path.write_bytes(contenido)
-    metadata = {"name": NOMBRE_ARCHIVO_ESTADO, "parents": [carpeta_raiz_id]}
-    media = MediaFileUpload(str(tmp_path), mimetype="application/json")
-    archivo = drive_service.files().create(body=metadata, media_body=media, fields="id").execute()
-    return archivo["id"]
-
-
-def leer_estado_publicaciones(drive_service, archivo_estado_id: str) -> dict:
-    request = drive_service.files().get_media(fileId=archivo_estado_id)
-    tmp_path = TMP_DIR / "estado_actual.json"
-    with open(tmp_path, "wb") as f:
-        downloader = MediaIoBaseDownload(f, request)
-        listo = False
-        while not listo:
-            _, listo = downloader.next_chunk()
-    try:
-        return json.loads(tmp_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {"fecha": datetime.date.today().isoformat(), "publicados": 0}
-
-
-def guardar_estado_publicaciones(drive_service, archivo_estado_id: str, estado: dict):
-    tmp_path = TMP_DIR / "estado_nuevo.json"
-    tmp_path.write_text(json.dumps(estado), encoding="utf-8")
-    media = MediaFileUpload(str(tmp_path), mimetype="application/json")
-    drive_service.files().update(fileId=archivo_estado_id, media_body=media).execute()
-
-
-# ---------------------------------------------------------------------------
 # YouTube helpers
 # ---------------------------------------------------------------------------
 
@@ -379,51 +340,51 @@ def publicar_en_youtube(youtube_service, ruta_video: Path, titulo: str, hashtags
 # Mecanismo de catch-up: 10 publicaciones/dia repartidas en horario activo
 # ---------------------------------------------------------------------------
 
-HORARIOS_CHILE = [
-    (0, 0),
-    (2, 30),
-    (5, 0),
-    (7, 30),
-    (10, 0),
-    (12, 0),
-    (14, 30),
-    (17, 0),
-    (19, 30),
-    (22, 0),
-]
-OFFSET_CHILE = datetime.timedelta(hours=-4)
+PUBLICACIONES_POR_DIA = 10
+HORA_INICIO_DIA = 0   # 08:00
+HORA_FIN_DIA = 24      # 23:00
 MAX_PUBLICACIONES_POR_CORRIDA = 3  # limite de seguridad por ejecucion del workflow
 
 
-def calcular_publicaciones_pendientes(drive_service, archivo_estado_id: str) -> int:
+def calcular_publicaciones_pendientes(drive_service, carpeta_videos_gen_id: str) -> int:
     """
-    Compara la hora actual (Chile) contra los 10 horarios fijos de
-    HORARIOS_CHILE para saber cuantas publicaciones deberian haberse hecho
-    hoy a esta hora, comparado con las que ya se publicaron segun el
-    contador explicito guardado en Drive (estado_publicaciones.json).
+    Calcula cuantos videos deberian haberse publicado hoy a esta hora,
+    comparado con los que ya se publicaron (contando archivos en
+    'Videos Generados/YYYY-MM-DD/'). Si el workflow se salto ejecuciones,
+    esto devuelve un numero > 1 para ponerse al dia.
 
-    Antes esto se calculaba contando archivos .mp4 dentro de
-    'Videos Generados/YYYY-MM-DD/' via drive.files().list(), pero esas
-    consultas tienen consistencia eventual: justo despues de subir un
-    video, a veces no aparecia en el listado, lo que hacia que el contador
-    se "congelara" y el script siguiera publicando de mas. El contador
-    explicito evita ese problema por completo.
+    Usa siempre la hora de Chile (no la hora UTC del runner de GitHub
+    Actions) para que "el dia" no cambie a las 20:00 hora Chile.
     """
-    ahora_utc = datetime.datetime.utcnow()
-    ahora_chile = ahora_utc + OFFSET_CHILE
-    hoy = ahora_chile.date().isoformat()
+    ahora = ahora_chile()
+    hoy = ahora.date().isoformat()
 
-    objetivo_hasta_ahora = sum(
-        1 for (h, m) in HORARIOS_CHILE
-        if (ahora_chile.hour, ahora_chile.minute) >= (h, m)
+    minutos_totales = (HORA_FIN_DIA - HORA_INICIO_DIA) * 60
+    minutos_transcurridos = max(
+        0, (ahora.hour - HORA_INICIO_DIA) * 60 + ahora.minute
     )
+    minutos_transcurridos = min(minutos_transcurridos, minutos_totales)
 
-    estado = leer_estado_publicaciones(drive_service, archivo_estado_id)
-    if estado.get("fecha") != hoy:
-        estado = {"fecha": hoy, "publicados": 0}
-        guardar_estado_publicaciones(drive_service, archivo_estado_id, estado)
+    if ahora.hour < HORA_INICIO_DIA:
+        objetivo_hasta_ahora = 0
+    else:
+        objetivo_hasta_ahora = round(
+            (minutos_transcurridos / minutos_totales) * PUBLICACIONES_POR_DIA
+        )
 
-    ya_publicados = estado.get("publicados", 0)
+    query = (
+        f"name = '{hoy}' and mimeType = 'application/vnd.google-apps.folder' "
+        f"and '{carpeta_videos_gen_id}' in parents and trashed = false"
+    )
+    resultado = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    carpetas = resultado.get("files", [])
+    ya_publicados = 0
+    if carpetas:
+        carpeta_hoy_id = carpetas[0]["id"]
+        q2 = f"'{carpeta_hoy_id}' in parents and trashed = false and mimeType = 'video/mp4'"
+        r2 = drive_service.files().list(q=q2, fields="files(id)").execute()
+        ya_publicados = len(r2.get("files", []))
+
     pendientes = max(0, objetivo_hasta_ahora - ya_publicados)
     print(
         f"[catch-up] objetivo hasta ahora: {objetivo_hasta_ahora} | "
@@ -491,7 +452,7 @@ def procesar_un_short(drive_service, carpeta_pendientes_id, carpeta_publicadas_i
     print(f"Publicado en YouTube: https://youtube.com/shorts/{video_id}")
 
     # --- Guardar copia en Drive ---
-    hoy = datetime.date.today().isoformat()
+    hoy = ahora_chile().date().isoformat()
     carpeta_fecha_id = crear_subcarpeta_si_no_existe(drive_service, hoy, carpeta_videos_gen_id)
     nombre_video_drive = f"{Path(nombre_archivo).stem}.mp4"
     subir_archivo_drive(drive_service, ruta_video_final, carpeta_fecha_id, nombre_video_drive)
@@ -512,9 +473,8 @@ def main():
     carpeta_pendientes_id = buscar_id_subcarpeta(drive_service, CARPETA_PENDIENTES, DRIVE_FOLDER_ID_RAIZ)
     carpeta_publicadas_id = crear_subcarpeta_si_no_existe(drive_service, CARPETA_PUBLICADAS, DRIVE_FOLDER_ID_RAIZ)
     carpeta_videos_gen_id = crear_subcarpeta_si_no_existe(drive_service, CARPETA_VIDEOS_GENERADOS, DRIVE_FOLDER_ID_RAIZ)
-    archivo_estado_id = _buscar_o_crear_archivo_estado(drive_service, DRIVE_FOLDER_ID_RAIZ)
 
-    pendientes = calcular_publicaciones_pendientes(drive_service, archivo_estado_id)
+    pendientes = calcular_publicaciones_pendientes(drive_service, carpeta_videos_gen_id)
     if pendientes == 0:
         print("Nada pendiente por ahora segun el horario objetivo. Fin.")
         return
@@ -527,16 +487,6 @@ def main():
         if not hubo_imagen:
             break
         publicados_en_esta_corrida += 1
-
-        # Incrementar el contador explicito inmediatamente tras cada
-        # publicacion exitosa, para que corridas siguientes vean el
-        # numero correcto sin depender de listados de Drive.
-        hoy = datetime.date.today().isoformat()
-        estado = leer_estado_publicaciones(drive_service, archivo_estado_id)
-        if estado.get("fecha") != hoy:
-            estado = {"fecha": hoy, "publicados": 0}
-        estado["publicados"] = estado.get("publicados", 0) + 1
-        guardar_estado_publicaciones(drive_service, archivo_estado_id, estado)
 
     print(f"== Proceso completado. Publicados en esta corrida: {publicados_en_esta_corrida} ==")
 
