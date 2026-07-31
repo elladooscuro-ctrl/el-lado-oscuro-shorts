@@ -4,15 +4,14 @@ El Lado Oscuro - Generador automatico de YouTube Shorts
 Flujo:
 1. Buscar en Drive la imagen mas antigua dentro de la carpeta "Pendientes/"
 2. Extraer la frase desde el nombre del archivo (guiones -> espacios)
-3. Generar narracion con edge-tts (voz es-MX-JorgeNeural), con 0.5s de
-   silencio antes y despues de la frase
-4. Generar un CTA final: pantalla negra + texto + voz diciendo
-   "Sigueme si quieres mas verdades como esta."
-5. Armar el video final (imagen fija + audio) con moviepy
-6. Generar titulo y hashtags (Gemini, con fallback local sin IA)
-7. Subir el video a YouTube (publico)
-8. Guardar copia en Drive: "Videos Generados/YYYY-MM-DD/"
-9. Mover la imagen origen a "Publicadas/" en Drive
+3. Generar narracion con edge-tts (voz es-MX-JorgeNeural), sin silencio
+   antes de la frase (arranca a hablar de inmediato) y con 0.5s de
+   silencio despues de la frase
+4. Armar el video final (imagen fija + audio) con moviepy
+5. Generar titulo y hashtags (Gemini, con fallback local sin IA)
+6. Subir el video a YouTube (publico)
+7. Guardar copia en Drive: "Videos Generados/YYYY-MM-DD/"
+8. Mover la imagen origen a "Publicadas/" en Drive
 
 Lecciones aplicadas del proyecto anterior (reels-automatizados):
 - moviepy fijado en 1.0.3 (versiones nuevas rompen la API usada aqui)
@@ -64,9 +63,8 @@ from moviepy.editor import (
 # ---------------------------------------------------------------------------
 
 VOZ = "es-MX-JorgeNeural"
-SILENCIO_INICIO = 0.5  # segundos
+SILENCIO_INICIO = 0  # segundos (sin silencio antes de hablar)
 SILENCIO_FIN = 0.5     # segundos
-TEXTO_CTA = "Sigueme si quieres mas verdades como esta."
 
 CARPETA_PENDIENTES = "Pendientes"
 CARPETA_PUBLICADAS = "Publicadas"
@@ -78,16 +76,6 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ANCHO, ALTO = 1080, 1920  # formato vertical short
 
 TMP_DIR = Path(tempfile.mkdtemp(prefix="lado_oscuro_"))
-
-# Offset horario de Chile respecto a UTC (usado para que "el dia" y las
-# publicaciones se calculen siempre en hora de Chile, no en UTC del runner).
-OFFSET_CHILE = datetime.timedelta(hours=-4)
-
-
-def ahora_chile() -> datetime.datetime:
-    """Hora actual ajustada a Chile (evita que el 'dia' cambie a las 20:00
-    hora Chile, que es cuando cambia el dia en UTC)."""
-    return datetime.datetime.utcnow() + OFFSET_CHILE
 
 
 # ---------------------------------------------------------------------------
@@ -116,12 +104,16 @@ def agregar_silencios(ruta_audio_in: Path, ruta_audio_out: Path,
                        silencio_inicio: float, silencio_fin: float):
     """Usa moviepy para anteponer/agregar silencio a un audio."""
     clip = AudioFileClip(str(ruta_audio_in))
-    silencio_i_path = TMP_DIR / "sil_i.mp3"
-    silencio_f_path = TMP_DIR / "sil_f.mp3"
-    _generar_silencio_mp3(silencio_i_path, silencio_inicio)
-    _generar_silencio_mp3(silencio_f_path, silencio_fin)
+    partes = [clip]
+    if silencio_inicio > 0:
+        silencio_i_path = TMP_DIR / "sil_i.mp3"
+        _generar_silencio_mp3(silencio_i_path, silencio_inicio)
+        partes.insert(0, AudioFileClip(str(silencio_i_path)))
+    if silencio_fin > 0:
+        silencio_f_path = TMP_DIR / "sil_f.mp3"
+        _generar_silencio_mp3(silencio_f_path, silencio_fin)
+        partes.append(AudioFileClip(str(silencio_f_path)))
 
-    partes = [AudioFileClip(str(silencio_i_path)), clip, AudioFileClip(str(silencio_f_path))]
     audio_final = concatenate_audioclips(partes)
     audio_final.write_audiofile(str(ruta_audio_out), fps=44100, logger=None)
     for p in partes:
@@ -146,21 +138,6 @@ def crear_clip_imagen_fija(ruta_imagen: Path, duracion: float) -> ImageClip:
         x_center=clip.w / 2, y_center=clip.h / 2, width=ANCHO, height=ALTO
     )
     return clip
-
-
-def crear_clip_cta(duracion: float) -> CompositeVideoClip:
-    """Pantalla negra con el texto del CTA, centrado."""
-    fondo = ColorClip(size=(ANCHO, ALTO), color=(0, 0, 0)).set_duration(duracion)
-    texto = TextClip(
-        TEXTO_CTA,
-        fontsize=70,
-        color="white",
-        font="DejaVu-Sans-Bold",
-        method="caption",
-        size=(ANCHO - 160, None),
-        align="center",
-    ).set_duration(duracion).set_position("center")
-    return CompositeVideoClip([fondo, texto])
 
 
 # ---------------------------------------------------------------------------
@@ -352,11 +329,8 @@ def calcular_publicaciones_pendientes(drive_service, carpeta_videos_gen_id: str)
     comparado con los que ya se publicaron (contando archivos en
     'Videos Generados/YYYY-MM-DD/'). Si el workflow se salto ejecuciones,
     esto devuelve un numero > 1 para ponerse al dia.
-
-    Usa siempre la hora de Chile (no la hora UTC del runner de GitHub
-    Actions) para que "el dia" no cambie a las 20:00 hora Chile.
     """
-    ahora = ahora_chile()
+    ahora = datetime.datetime.now()
     hoy = ahora.date().isoformat()
 
     minutos_totales = (HORA_FIN_DIA - HORA_INICIO_DIA) * 60
@@ -426,15 +400,8 @@ def procesar_un_short(drive_service, carpeta_pendientes_id, carpeta_publicadas_i
     clip_imagen = crear_clip_imagen_fija(ruta_imagen_local, duracion_principal)
     clip_imagen = clip_imagen.set_audio(audio_principal)
 
-    # --- CTA final ---
-    ruta_tts_cta = TMP_DIR / "cta_crudo.mp3"
-    asyncio.run(generar_audio_tts(TEXTO_CTA, ruta_tts_cta))
-    audio_cta = AudioFileClip(str(ruta_tts_cta))
-    clip_cta = crear_clip_cta(audio_cta.duration + 0.5)
-    clip_cta = clip_cta.set_audio(audio_cta.set_start(0.2))
-
     # --- Video final ---
-    video_final = concatenate_videoclips([clip_imagen, clip_cta], method="compose")
+    video_final = clip_imagen
     ruta_video_final = TMP_DIR / f"short_final_{file_id}.mp4"
     video_final.write_videofile(
         str(ruta_video_final), fps=30, codec="libx264", audio_codec="aac", logger=None
@@ -452,7 +419,7 @@ def procesar_un_short(drive_service, carpeta_pendientes_id, carpeta_publicadas_i
     print(f"Publicado en YouTube: https://youtube.com/shorts/{video_id}")
 
     # --- Guardar copia en Drive ---
-    hoy = ahora_chile().date().isoformat()
+    hoy = datetime.date.today().isoformat()
     carpeta_fecha_id = crear_subcarpeta_si_no_existe(drive_service, hoy, carpeta_videos_gen_id)
     nombre_video_drive = f"{Path(nombre_archivo).stem}.mp4"
     subir_archivo_drive(drive_service, ruta_video_final, carpeta_fecha_id, nombre_video_drive)
