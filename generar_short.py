@@ -511,6 +511,9 @@ def main():
     )
 
     pendientes, ya_publicados_hoy = calcular_publicaciones_pendientes(drive_service, carpeta_videos_gen_id)
+    if os.environ.get("FORZAR") == "true" and pendientes == 0:
+        print("[FORZAR] Se fuerza 1 publicacion aunque no toque por horario.")
+        pendientes = 1
     if pendientes == 0:
         print("Nada pendiente por ahora segun el horario objetivo. Fin.")
         return
