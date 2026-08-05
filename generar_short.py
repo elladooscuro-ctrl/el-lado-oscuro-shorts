@@ -166,8 +166,9 @@ def generar_metadatos_con_gemini(frase: str):
         genai.configure(api_key=GEMINI_API_KEY)
         modelo = genai.GenerativeModel("gemini-2.5-flash")
         prompt = (
-            "Genera un titulo corto y llamativo para un YouTube Short en español "
-            f"basado en esta frase motivacional/reflexiva: \"{frase}\". "
+            "Genera un titulo corto y llamativo (maximo 6 palabras) para un "
+            "YouTube Short en español, basado en esta frase motivacional/"
+            f"reflexiva: \"{frase}\". "
             "Tambien genera 8 hashtags relevantes en español (sin espacios, con #). "
             "Responde en formato JSON con las claves 'titulo' y 'hashtags' (lista)."
         )
@@ -177,6 +178,8 @@ def generar_metadatos_con_gemini(frase: str):
         datos = json.loads(texto)
         titulo = datos.get("titulo", "").strip()
         hashtags = datos.get("hashtags", [])
+        if titulo and len(titulo.split()) > 6:
+            titulo = " ".join(titulo.split()[:6])
         if titulo and hashtags:
             return titulo, hashtags
         return generar_metadatos_fallback(frase)
@@ -187,9 +190,8 @@ def generar_metadatos_con_gemini(frase: str):
 
 def generar_metadatos_fallback(frase: str):
     """Fallback 100% local, sin IA, a costo cero."""
-    titulo = frase.strip()
-    if not titulo.endswith((".", "!", "?")):
-        titulo += "."
+    palabras = frase.strip().split()
+    titulo = " ".join(palabras[:6])
     titulo = f"{titulo} #shorts"
 
     hashtags_base = [
