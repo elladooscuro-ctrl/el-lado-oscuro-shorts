@@ -20,7 +20,8 @@ Flujo (material desde Drive: carpeta VIDEO + carpeta TEXTO):
    subtitulos cortos sincronizados con la narracion
 5. Generar titulo y hashtags (Gemini, con fallback local sin IA)
 6. Subir el video a YouTube (publico)
-7. Guardar copia en Drive: "Videos Generados/YYYY-MM-DD/"
+7. Guardar copia en Drive: "Videos Generados/YYYY-MM-DD/", con el
+   mismo nombre (sanitizado) que el titulo publicado en YouTube
 
 Lecciones aplicadas del proyecto anterior (reels-automatizados):
 - moviepy fijado en 1.0.3 (versiones nuevas rompen la API usada aqui)
@@ -266,6 +267,17 @@ def generar_metadatos_fallback(frase: str):
     ]
     random.shuffle(hashtags_base)
     return titulo, hashtags_base
+
+
+def sanitizar_nombre_archivo(texto: str) -> str:
+    """Convierte un titulo en un nombre de archivo valido: sin caracteres
+    especiales problematicos, sin barras, y con longitud acotada."""
+    nombre = texto.strip()
+    nombre = re.sub(r"[\\/:*?\"<>|]", "", nombre)  # caracteres invalidos en nombres de archivo
+    nombre = re.sub(r"\s+", " ", nombre).strip()
+    if not nombre:
+        nombre = "short"
+    return nombre[:150]
 
 # ---------------------------------------------------------------------------
 # Google Drive helpers
@@ -559,10 +571,11 @@ def procesar_un_short(drive_service, carpeta_videos_gen_id: str, indice: int) ->
     video_id = publicar_en_youtube(youtube_service, ruta_video_final, titulo, hashtags, frase)
     print(f"Publicado en YouTube: https://youtube.com/shorts/{video_id}")
 
-    # --- Guardar copia en Drive ---
+    # --- Guardar copia en Drive (con el mismo nombre que el titulo de YouTube) ---
     hoy = datetime.date.today().isoformat()
     carpeta_fecha_id = crear_subcarpeta_si_no_existe(drive_service, hoy, carpeta_videos_gen_id)
-    nombre_video_drive = f"short_{hoy}_{indice}.mp4"
+    nombre_base = sanitizar_nombre_archivo(titulo)
+    nombre_video_drive = f"{nombre_base}.mp4"
     subir_archivo_drive(drive_service, ruta_video_final, carpeta_fecha_id, nombre_video_drive)
     print(f"Copia guardada en Drive: Videos Generados/{hoy}/{nombre_video_drive}")
 
