@@ -15,7 +15,9 @@ Flujo (material desde Drive: carpeta VIDEO + carpeta TEXTO):
    silencio despues de la frase
 4. Armar el video final (video de fondo + audio) con moviepy: el video
    se ajusta (loop o recorte) para durar exactamente lo mismo que el
-   audio
+   audio, y se agrega el TEXTO de la frase en pantalla (subtitulo),
+   alternando al azar entre dos estilos: frase completa fija, o
+   subtitulos cortos sincronizados con la narracion
 5. Generar titulo y hashtags (Gemini, con fallback local sin IA)
 6. Subir el video a YouTube (publico)
 7. Guardar copia en Drive: "Videos Generados/YYYY-MM-DD/"
@@ -152,6 +154,69 @@ def crear_clip_video_fondo(ruta_video: Path, duracion: float) -> VideoFileClip:
         clip = concatenate_videoclips([clip] * n_loops)
     clip = clip.subclip(0, duracion)
     return clip
+
+# ---------------------------------------------------------------------------
+# Texto en pantalla (subtitulo): frase fija o sincronizada, al azar
+# ---------------------------------------------------------------------------
+
+ESTILOS_TEXTO = ["fijo", "sincronizado"]
+
+
+def _crear_textclip(texto: str, fontsize: int = 66) -> TextClip:
+    return TextClip(
+        texto,
+        fontsize=fontsize,
+        color="white",
+        font="DejaVu-Sans-Bold",
+        method="caption",
+        size=(ANCHO - 140, None),
+        align="center",
+        stroke_color="black",
+        stroke_width=2.5,
+    )
+
+
+def crear_texto_frase_fija(frase: str, duracion: float) -> TextClip:
+    """La frase completa aparece fija en el centro durante todo el video."""
+    txt = _crear_textclip(frase, fontsize=64)
+    txt = txt.set_duration(duracion).set_position("center")
+    return [txt]
+
+
+def crear_texto_sincronizado(frase: str, duracion: float):
+    """La frase se divide en fragmentos cortos que aparecen en pantalla
+    repartidos proporcionalmente a lo largo de la duracion del audio,
+    simulando subtitulos sincronizados con la narracion."""
+    palabras = frase.split()
+    tamano_grupo = 4
+    grupos = [
+        " ".join(palabras[i:i + tamano_grupo])
+        for i in range(0, len(palabras), tamano_grupo)
+    ]
+    if not grupos:
+        grupos = [frase]
+    dur_por_grupo = duracion / len(grupos)
+
+    clips = []
+    for i, grupo in enumerate(grupos):
+        txt = _crear_textclip(grupo, fontsize=72)
+        txt = txt.set_start(i * dur_por_grupo).set_duration(dur_por_grupo)
+        txt = txt.set_position("center")
+        clips.append(txt)
+    return clips
+
+
+def agregar_texto_a_video(clip_video, frase: str, duracion: float):
+    """Elige al azar un estilo de subtitulo (frase fija o sincronizada) y
+    lo compone sobre el video de fondo. Devuelve (video_con_texto, estilo)."""
+    estilo = random.choice(ESTILOS_TEXTO)
+    if estilo == "fijo":
+        overlays = crear_texto_frase_fija(frase, duracion)
+    else:
+        overlays = crear_texto_sincronizado(frase, duracion)
+    video_con_texto = CompositeVideoClip([clip_video] + overlays)
+    video_con_texto = video_con_texto.set_duration(duracion)
+    return video_con_texto, estilo
 
 # ---------------------------------------------------------------------------
 # Generacion de titulo / hashtags
@@ -472,6 +537,8 @@ def procesar_un_short(drive_service, carpeta_videos_gen_id: str, indice: int) ->
     duracion_principal = audio_principal.duration
 
     clip_video = crear_clip_video_fondo(ruta_video_local, duracion_principal)
+    clip_video, estilo_texto = agregar_texto_a_video(clip_video, frase, duracion_principal)
+    print(f"Estilo de texto en pantalla: {estilo_texto}")
     clip_video = clip_video.set_audio(audio_principal)
 
     # --- Video final ---
