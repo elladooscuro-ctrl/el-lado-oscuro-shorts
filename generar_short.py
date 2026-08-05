@@ -164,7 +164,7 @@ def generar_metadatos_con_gemini(frase: str):
     try:
         import google.generativeai as genai
         genai.configure(api_key=GEMINI_API_KEY)
-        modelo = genai.GenerativeModel("gemini-1.5-flash")
+        modelo = genai.GenerativeModel("gemini-2.5-flash")
         prompt = (
             "Genera un titulo corto y llamativo para un YouTube Short en español "
             f"basado en esta frase motivacional/reflexiva: \"{frase}\". "
